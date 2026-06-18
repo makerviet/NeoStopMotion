@@ -9,7 +9,10 @@ ApplicationWindow {
     width: 1280
     height: 800
     visible: true
-    visibility: Window.Windowed
+    // Maximized: trên một số nền (vd NEO One/Armbian + xfwm) cửa sổ Windowed không
+    // áp được width/height và bị thu về 1x1. Maximized để WM tự co theo màn hình,
+    // hợp kiosk maker-station mà vẫn còn nút đóng (khác FullScreen).
+    visibility: Window.Maximized
     title: "NeoStopMotion — Trạm 6"
     color: N.NeoConstants.background
 

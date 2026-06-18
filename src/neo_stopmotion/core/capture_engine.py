@@ -1,4 +1,6 @@
 from __future__ import annotations
+import glob
+import os
 import time
 import cv2
 import numpy as np
@@ -32,23 +34,47 @@ class CaptureEngine:
     def is_open(self) -> bool:
         return self._cap is not None and self._cap.isOpened()
 
+    def _candidate_indexes(self) -> list[int]:
+        """Webcam index cần thử: env NEO_STOPMOTION_WEBCAM_INDEX > index cấu hình +
+        các /dev/video* CÓ THẬT. Trên Linux camera thật thường không ở index 0 (các node
+        phụ như metadata/obsensor mở index 0 thất bại) nên cần dò."""
+        env = os.environ.get("NEO_STOPMOTION_WEBCAM_INDEX", "")
+        if env.strip().lstrip("-").isdigit():
+            return [int(env)]
+        others: list[int] = []
+        for path in sorted(glob.glob("/dev/video*")):
+            digits = "".join(filter(str.isdigit, os.path.basename(path)))
+            if digits.isdigit() and int(digits) != self.webcam_index:
+                others.append(int(digits))
+        return [self.webcam_index] + others
+
     def open(self) -> None:
+        # Ép backend V4L2 trên Linux: mở nhanh + tránh backend dò chậm (obsensor) gây
+        # treo vài giây mỗi index. Nền khác (vd 0) dùng backend mặc định.
+        backend = getattr(cv2, "CAP_V4L2", 0)
+        candidates = self._candidate_indexes()
         last_err: Exception | None = None
         for attempt in range(1, self.retry_count + 1):
-            try:
-                cap = cv2.VideoCapture(self.webcam_index)
-                if not cap.isOpened():
-                    raise CaptureError(f"Cannot open webcam index {self.webcam_index}")
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.resolution[0])
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.resolution[1])
-                self._cap = cap
-                logger.info(f"Webcam opened (index={self.webcam_index}, attempt={attempt})")
-                return
-            except Exception as e:
-                last_err = e
-                logger.warning(f"Webcam open attempt {attempt} failed: {e}")
-                time.sleep(self.retry_delay_seconds)
-        raise CaptureError(f"Failed to open webcam after {self.retry_count} retries") from last_err
+            for index in candidates:
+                try:
+                    cap = cv2.VideoCapture(index, backend) if backend else cv2.VideoCapture(index)
+                    if cap.isOpened():
+                        ok, _ = cap.read()      # xác nhận đọc được frame, không chỉ mở
+                        if ok:
+                            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.resolution[0])
+                            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.resolution[1])
+                            self._cap = cap
+                            self.webcam_index = index
+                            logger.info(f"Webcam opened (index={index}, attempt={attempt})")
+                            return
+                    cap.release()
+                except Exception as e:  # noqa: BLE001 - thử index kế tiếp
+                    last_err = e
+            logger.warning(f"Webcam open attempt {attempt} failed (tried {candidates})")
+            time.sleep(self.retry_delay_seconds)
+        raise CaptureError(
+            f"Failed to open webcam (tried {candidates}) after {self.retry_count} retries"
+        ) from last_err
 
     def capture_frame(self) -> np.ndarray:
         if self._cap is None:
